@@ -1,0 +1,258 @@
+name: ML Pipeline
+on:
+  push:
+    paths:
+      - "ml/**"
+      - "ai/**"
+      - "data/**"
+    branches: [main, develop]
+  pull_request:
+    paths:
+      - "ml/**"
+      - "ai/**"
+      - "data/**"
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Model to train (all/gesture/sign_language/emotion/multimodal/personalization)"
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - gesture
+          - sign_language
+          - emotion
+          - multimodal
+          - personalization
+      skip_evaluation:
+        description: "Skip evaluation step"
+        required: false
+        default: false
+        type: boolean
+      skip_registration:
+        description: "Skip model registration"
+        required: false
+        default: false
+        type: boolean
+
+env:
+  MODEL_REGISTRY: ghcr.io/${{ github.repository }}/models
+  MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+  WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+
+jobs:
+  data-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          pip install -r ml/requirements.txt --quiet
+          pip install great-expectations pandas numpy
+      - name: Validate training data
+        run: |
+          python -m ml.pipelines.data_validation \
+            --data-dir data/ \
+            --expectations-suite data/expectations/suite.json
+      - name: Check data drift
+        run: |
+          python -m ml.pipelines.drift_detection \
+            --reference data/reference/ \
+            --current data/ \
+            --threshold 0.05
+
+  training:
+    needs: [data-validation]
+    runs-on: [self-hosted, gpu-large]
+    container:
+      image: pytorch/pytorch:2.5.0-cuda12.4-cudnn9-runtime
+      options: --gpus all
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          pip install -r ml/requirements.txt --quiet
+          pip install wandb mlflow boto3
+      - name: Train gesture classification model
+        if: ${{ github.event.inputs.model == 'all' || github.event.inputs.model == 'gesture' }}
+        run: |
+          python -m ml.gesture_models.training.train \
+            --config ml/gesture_models/training/config.yaml \
+            --output-dir /artifacts/gesture_model \
+            --tracking-uri $MLFLOW_TRACKING_URI
+        env:
+          WANDB_PROJECT: neurolink-gesture
+      - name: Train sign language model
+        if: ${{ github.event.inputs.model == 'all' || github.event.inputs.model == 'sign_language' }}
+        run: |
+          python -m ml.sign_language.models.train \
+            --config ml/sign_language/models/config.yaml \
+            --output-dir /artifacts/sign_language_model \
+            --tracking-uri $MLFLOW_TRACKING_URI
+        env:
+          WANDB_PROJECT: neurolink-sign-language
+      - name: Train emotion detection model
+        if: ${{ github.event.inputs.model == 'all' || github.event.inputs.model == 'emotion' }}
+        run: |
+          python -m ml.emotion_detection.facial.train \
+            --config ml/emotion_detection/facial/config.yaml \
+            --output-dir /artifacts/emotion_facial_model
+          python -m ml.emotion_detection.vocal.train \
+            --config ml/emotion_detection/vocal/config.yaml \
+            --output-dir /artifacts/emotion_vocal_model
+        env:
+          WANDB_PROJECT: neurolink-emotion
+      - name: Train multimodal fusion model
+        if: ${{ github.event.inputs.model == 'all' || github.event.inputs.model == 'multimodal' }}
+        run: |
+          python -m ml.multimodal.fusion.train \
+            --config ml/multimodal/fusion/config.yaml \
+            --output-dir /artifacts/multimodal_model
+          python -m ml.multimodal.attention.train \
+            --config ml/multimodal/attention/config.yaml \
+            --output-dir /artifacts/attention_model
+        env:
+          WANDB_PROJECT: neurolink-multimodal
+      - name: Train personalization model
+        if: ${{ github.event.inputs.model == 'all' || github.event.inputs.model == 'personalization' }}
+        run: |
+          python -m ml.personalization.adaptation.train \
+            --config ml/personalization/adaptation/config.yaml \
+            --output-dir /artifacts/personalization_model
+        env:
+          WANDB_PROJECT: neurolink-personalization
+      - name: Upload training artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: trained-models
+          path: /artifacts/
+          retention-days: 7
+
+  evaluation:
+    needs: [training]
+    if: ${{ !inputs.skip_evaluation }}
+    runs-on: [self-hosted, gpu-large]
+    container:
+      image: pytorch/pytorch:2.5.0-cuda12.4-cudnn9-runtime
+      options: --gpus all
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download training artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: trained-models
+          path: /artifacts/
+      - name: Install dependencies
+        run: |
+          pip install -r ml/requirements.txt --quiet
+          pip install mlflow boto3
+      - name: Evaluate gesture model
+        run: |
+          python -m ml.gesture_models.evaluation.evaluate \
+            --model-path /artifacts/gesture_model \
+            --test-data data/test/gesture/ \
+            --output /artifacts/gesture_model/eval_results.json
+      - name: Evaluate sign language model
+        run: |
+          python -m ml.sign_language.translation.evaluate \
+            --model-path /artifacts/sign_language_model \
+            --test-data data/test/sign_language/ \
+            --output /artifacts/sign_language_model/eval_results.json
+      - name: Evaluate multimodal model
+        run: |
+          python -m ml.multimodal.fusion.evaluate \
+            --model-path /artifacts/multimodal_model \
+            --test-data data/test/multimodal/ \
+            --output /artifacts/multimodal_model/eval_results.json
+      - name: Evaluate emotion model
+        run: |
+          python -m ml.emotion_detection.facial.evaluate \
+            --model-path /artifacts/emotion_facial_model \
+            --test-data data/test/emotion/ \
+            --output /artifacts/emotion_facial_model/eval_results.json
+      - name: Compare with baseline
+        id: comparison
+        run: |
+          python -m ml.pipelines.evaluation_comparison \
+            --artifacts-dir /artifacts/ \
+            --baseline data/baseline_metrics.json \
+            --output /artifacts/comparison.json
+      - name: Upload evaluation results
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-results
+          path: /artifacts/**/eval_results.json /artifacts/comparison.json
+          retention-days: 30
+
+  register-and-deploy:
+    needs: [evaluation]
+    if: ${{ !inputs.skip_registration && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download evaluation results
+        uses: actions/download-artifact@v4
+        with:
+          name: evaluation-results
+          path: /artifacts/
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install mlflow boto3 pyyaml
+      - name: Register models in MLflow
+        run: |
+          python -m ml.pipelines.model_registry \
+            --artifacts-dir /artifacts/ \
+            --tracking-uri $MLFLOW_TRACKING_URI \
+            --stage production
+      - name: Check accuracy improvement
+        id: accuracy-check
+        run: |
+          python -m ml.pipelines.accuracy_gate \
+            --comparison /artifacts/comparison.json \
+            --min-improvement 0.01 \
+            --output /artifacts/deploy_decision.json
+      - name: Deploy models to staging
+        if: steps.accuracy-check.outputs.should_deploy == 'true'
+        run: |
+          python -m ml.pipelines.deploy_models \
+            --models-dir /artifacts/ \
+            --target staging \
+            --api-url https://staging.neurolink.dev/api/v1/models/update
+        env:
+          API_KEY: ${{ secrets.STAGING_API_KEY }}
+      - name: Deploy models to production
+        if: steps.accuracy-check.outputs.should_deploy == 'true' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          python -m ml.pipelines.deploy_models \
+            --models-dir /artifacts/ \
+            --target production \
+            --api-url https://api.neurolink.dev/api/v1/models/update
+        env:
+          API_KEY: ${{ secrets.PROD_API_KEY }}
+      - name: Notify ML pipeline completion
+        if: always()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "Neurolink ML pipeline completed",
+              "blocks": [{
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Neurolink ML Pipeline*\nStatus: ${{ job.status }}\nBranch: ${{ github.ref_name }}\nSHA: ${{ github.sha }}\nShould Deploy: ${{ steps.accuracy-check.outputs.should_deploy }}"
+                }
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

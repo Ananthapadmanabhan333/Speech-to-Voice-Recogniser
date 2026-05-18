@@ -1,0 +1,177 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    system: neurolink
+    environment: "${ENVIRONMENT}"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # - alertmanager:9093
+
+rule_files:
+  - "alerts/*.yml"
+
+scrape_configs:
+  # ── Backend service ─────────────────────────────────────────────────────
+  - job_name: "neurolink-backend"
+    scrape_interval: 10s
+    scrape_timeout: 8s
+    metrics_path: "/metrics"
+    scheme: http
+    static_configs:
+      - targets: ["backend:8000"]
+        labels:
+          service: "backend"
+          component: "api"
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        regex: "([^:]+):.*"
+        replacement: "${1}"
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: "(http_requests_total|http_request_duration_seconds|active_ws_connections|db_health)"
+        action: keep
+
+  # ── AI worker service ───────────────────────────────────────────────────
+  - job_name: "neurolink-ai-worker"
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: "/metrics"
+    scheme: http
+    static_configs:
+      - targets: ["ai-worker:9091"]
+        labels:
+          service: "ai-worker"
+          component: "ml-inference"
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: "(model_inference_latency|model_requests_total|model_errors_total|gpu_memory_usage|gpu_utilization)"
+        action: keep
+
+  # ── PostgreSQL exporter ─────────────────────────────────────────────────
+  - job_name: "postgres"
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+        labels:
+          service: "database"
+          component: "postgresql"
+
+  # ── Redis exporter ──────────────────────────────────────────────────────
+  - job_name: "redis"
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+        labels:
+          service: "cache"
+          component: "redis"
+
+  # ── Node exporter (host metrics) ────────────────────────────────────────
+  - job_name: "node"
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["node-exporter:9100"]
+        labels:
+          service: "infrastructure"
+          component: "host"
+
+  # ── Docker daemon metrics ───────────────────────────────────────────────
+  - job_name: "docker"
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["docker-exporter:9323"]
+        labels:
+          service: "infrastructure"
+          component: "docker"
+
+  # ── NVIDIA GPU metrics ─────────────────────────────────────────────────
+  - job_name: "nvidia-gpu"
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ["nvidia-dcgm:9400"]
+        labels:
+          service: "infrastructure"
+          component: "gpu"
+
+alerting_rules:
+  groups:
+    - name: neurolink_service_alerts
+      interval: 30s
+      rules:
+        - alert: BackendDown
+          expr: up{job="neurolink-backend"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Backend service is down"
+            description: "Backend has been unreachable for >1 minute."
+
+        - alert: HighRequestLatency
+          expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 2
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High request latency detected"
+            description: "P95 latency is above 2 seconds for 5 minutes."
+
+        - alert: HighErrorRate
+          expr: rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "High error rate detected"
+            description: "Error rate is above 5% for 5 minutes."
+
+        - alert: DatabaseDown
+          expr: db_health == 0
+          for: 30s
+          labels:
+            severity: critical
+          annotations:
+            summary: "Database is unhealthy"
+            description: "Database health check has failed."
+
+        - alert: HighGPUUtilization
+          expr: gpu_utilization > 95
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High GPU utilization"
+            description: "GPU usage is above 95% for 10 minutes."
+
+        - alert: ModelInferenceErrors
+          expr: rate(model_errors_total[5m]) > 10
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High model inference error rate"
+            description: "Inference errors are above 10/min for 2 minutes."
+
+        - alert: DiskSpaceLow
+          expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100 < 10
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Low disk space"
+            description: "Disk usage is above 90%."
+
+        - alert: MemoryPressure
+          expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 90
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High memory pressure"
+            description: "Memory usage is above 90%."

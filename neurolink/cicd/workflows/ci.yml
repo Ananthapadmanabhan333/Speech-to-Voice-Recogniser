@@ -1,0 +1,182 @@
+name: CI
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install Python deps
+        run: |
+          pip install -r backend/requirements.txt --quiet
+          pip install -r ai/requirements.txt --quiet
+          pip install ruff mypy pytest pytest-asyncio pytest-cov httpx
+      - name: Install Node deps
+        run: npm ci
+      - name: Lint Python
+        run: ruff check backend/ ai/ ml/ edge/ tests/ --line-length=120
+      - name: Lint TypeScript
+        run: npm run lint
+      - name: Type check TypeScript
+        run: npm run typecheck
+
+  test:
+    needs: [lint]
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: neurolink
+          POSTGRES_PASSWORD: neurolink_pass
+          POSTGRES_DB: neurolink_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install Python deps
+        run: |
+          pip install -r backend/requirements.txt --quiet
+          pip install -r ai/requirements.txt --quiet
+          pip install pytest pytest-asyncio pytest-cov pytest-mock httpx
+      - name: Install Node deps
+        run: npm ci
+      - name: Run backend unit tests
+        run: pytest tests/unit/backend -v --cov=backend --cov-report=xml --cov-report=term --timeout=60
+        env:
+          DATABASE_URL: postgresql+asyncpg://neurolink:neurolink_pass@localhost:5432/neurolink_test
+          REDIS_URL: redis://localhost:6379
+          ENVIRONMENT: testing
+          JWT_SECRET: test-secret-key
+      - name: Run AI unit tests
+        run: pytest tests/unit/ai -v --cov=ai --cov-report=xml --cov-report=term --timeout=120
+        env:
+          REDIS_URL: redis://localhost:6379
+          ENVIRONMENT: testing
+      - name: Run JS/TS tests
+        run: npm test
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          flags: unittests
+          fail_ci_if_error: false
+
+  integration:
+    needs: [lint]
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: neurolink
+          POSTGRES_PASSWORD: neurolink_pass
+          POSTGRES_DB: neurolink_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install deps
+        run: |
+          pip install -r backend/requirements.txt --quiet
+          pip install -r ai/requirements.txt --quiet
+          pip install pytest pytest-asyncio httpx
+      - name: Run integration tests
+        run: pytest tests/integration -v --timeout=120
+        env:
+          DATABASE_URL: postgresql+asyncpg://neurolink:neurolink_pass@localhost:5432/neurolink_test
+          REDIS_URL: redis://localhost:6379
+          ENVIRONMENT: testing
+          JWT_SECRET: test-secret-key
+
+  docker-build:
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/backend/Dockerfile
+          push: false
+          tags: neurolink/backend:ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/frontend/Dockerfile
+          push: false
+          tags: neurolink/frontend:ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build AI worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/ai/Dockerfile
+          push: false
+          tags: neurolink/ai-worker:ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

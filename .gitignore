@@ -1,0 +1,80 @@
+# Dependencies
+**/node_modules/
+.pnp
+.pnp.js
+
+# Build
+**/.next/
+**/out/
+**/dist/
+**/build/
+**/*.egg-info/
+
+# Environment
+**/.env
+**/.env.local
+**/.env.development.local
+**/.env.test.local
+**/.env.production.local
+**/*.pem
+
+# IDE
+.vscode/
+.idea/
+**/*.swp
+**/*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+**/*.log
+
+# Python
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+**/*.so
+.Python
+**/env/
+**/venv/
+**/.venv/
+**/*.whl
+
+# ML Models
+**/ml/**/models/*.h5
+**/ml/**/models/*.pt
+**/ml/**/models/*.pth
+**/ml/**/models/*.onnx
+**/ml/**/models/*.trt
+**/ml/**/models/*.engine
+**/ml/**/models/*.db
+**/ml/**/data/raw/
+**/ml/**/data/processed/
+
+# Edge
+**/edge/**/*.trt
+**/edge/**/*.engine
+**/edge/**/*.onnx
+
+# Vector Memory
+**/vector_memory/**/*.db
+**/vector_memory/**/*.pickle
+
+# Docker
+**/docker/data/
+
+# Testing
+**/coverage/
+**/.nyc_output/
+**/junit.xml
+**/test-results/
+
+# Logs
+**/logs/
+**/*.log
+**/npm-debug.log*
+
+# Downloads
+**/downloads/
+**/temp/
